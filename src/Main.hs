@@ -18,6 +18,12 @@ type Hash = String
 data SourceFileHashed = SourceFileHashed (FilePath, Hash)
    deriving (Show, Eq)
 
+data Email = EmailConfirmed String | EmailUnconfirmed String
+
+data User = User {
+     email :: Email
+}
+
 main :: IO ()
 main = do
     (source, target) <- readConfig
@@ -28,6 +34,8 @@ main = do
     mapM_ (putStrLn . show) sourceFilesHashed
 
     createDirectoryIfMissing True target
+
+    users <- readUsers
 
     quickHttpServe site
 
@@ -43,6 +51,21 @@ readConfig = do
     putStrLn $ "Target dir: " ++ target
 
     return (source, target)
+
+readUsers :: IO ([User])
+readUsers = do
+      home <- getHomeDirectory
+      contents <- readFile $ home ++ "/.work-distributer-users"
+      let users = map readUser $ lines contents
+      return users
+
+readUser :: String -> User
+readUser line = case status of
+             "C" -> User {email = EmailConfirmed email'}
+             "U" -> User {email = EmailUnconfirmed email'}
+         where
+             (status, email_) = splitAt 1 line
+             email' = drop 1 email_
 
 getSourceFiles :: SourceDir -> IO [FilePath]
 getSourceFiles source = do
