@@ -28,11 +28,11 @@ data SourceFileHashed = SourceFileHashed FilePath Hash
 data SourceFile = SourceFile SourceFileHashed DateTime
    deriving (Show, Eq)
 
-data Email = EmailConfirmed String | EmailUnconfirmed String
-
-data User = User {
-     email :: Email
-}
+data AppState = AppState {
+    stateSourceFiles :: [SourceFile],
+    stateSourceDir :: SourceDir,
+    stateTargetDir :: DestinationDir
+} deriving (Show)
 
 main :: IO ()
 main = do
@@ -47,9 +47,9 @@ main = do
 
     createDirectoryIfMissing True target
 
-    users <- readUsers
+    let state = AppState {stateSourceFiles = sourceFiles, stateSourceDir = source, stateTargetDir = target}
 
-    quickHttpServe $ site (source, target) sourceFiles
+    quickHttpServe site
 
 readConfig :: IO AppConfig
 readConfig = do
@@ -64,25 +64,11 @@ readConfig = do
 
     return (source, target)
 
-readUsers :: IO ([User])
-readUsers = do
-      home <- getHomeDirectory
-      contents <- readFile $ home ++ "/.work-distributer-users"
-      let users = map readUser $ lines contents
-      return users
-
-readUser :: String -> User
-readUser line = case status of
-             "C" -> User {email = EmailConfirmed email'}
-             "U" -> User {email = EmailUnconfirmed email'}
-         where
-             (status, email_) = splitAt 1 line
-             email' = drop 1 email_
-
 getSourceFiles :: SourceDir -> IO [FilePath]
 getSourceFiles source = do
     createDirectoryIfMissing True source
     allFiles <- getDirectoryContents source
+
     let sourceFiles = filter (flip notElem [".", ".."]) allFiles
     let sourceFilesWithDir = map (\f -> source ++ "/" ++ f) sourceFiles
 
@@ -99,8 +85,8 @@ computeFileContentHash filePath contents =
         let hash = showDigest $ sha256 $ pack $ filePath ++ contents
         in SourceFileHashed filePath hash
 
-site :: AppConfig -> [SourceFile] -> Snap ()
-site config sourceFilesHashed =
+site :: Snap ()
+site =
     ifTop (writeBS "hello world") <|>
     route [ ("foo", writeBS "bar")
           , ("echo/:echoparam", echoHandler)
