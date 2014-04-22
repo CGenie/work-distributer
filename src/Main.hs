@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Main where
 
 import Data.List (sortBy)
@@ -7,13 +8,18 @@ import Data.ByteString.Lazy.Char8 (pack)
 import Data.Either.Utils (forceEither)
 import Data.Digest.Pure.SHA (sha256, showDigest)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing, getDirectoryContents)
+import qualified Data.Text as T
 
 import Data.DateTime (getCurrentTime, DateTime)
 
 import           Control.Applicative
-import           Snap.Core
-import           Snap.Util.FileServe
-import           Snap.Http.Server
+
+import           Snap
+import Snap.Snaplet.Heist
+import Control.Lens
+import Heist
+import Heist.Interpreted
+
 
 type SourceDir = String
 type DestinationDir = String
@@ -24,30 +30,30 @@ type Hash = String
 
 data SourceFileHashed = SourceFileHashed FilePath Hash
    deriving (Show, Eq)
+fileFromHash :: SourceFileHashed -> FilePath
+fileFromHash (SourceFileHashed fp _) = fp
+hashFromHash :: SourceFileHashed -> Hash
+hashFromHash (SourceFileHashed _ h) = h
 
 data SourceFile = SourceFile SourceFileHashed DateTime
    deriving (Show, Eq)
+hashFromSourceFile :: SourceFile -> SourceFileHashed
+hashFromSourceFile (SourceFile sfh _) = sfh
 
 data AppState = AppState {
-    stateSourceFiles :: [SourceFile],
-    stateSourceDir :: SourceDir,
-    stateTargetDir :: DestinationDir
-} deriving (Show)
+    _heist :: Snaplet (Heist AppState),
+    _stateSourceFiles :: [SourceFile],
+    _stateSourceDir :: SourceDir,
+    _stateTargetDir :: DestinationDir
+}
+makeLenses ''AppState
+
+instance HasHeist AppState where
+    heistLens = subSnaplet heist
 
 main :: IO ()
 main = do
-    (source, target) <- readConfig
-    sourceFiles' <- getSourceFiles source
-    sourceFilesHashed <- mapM computeFileHash sourceFiles'
-    now <- getCurrentTime
-    let sourceFiles = map (\sf -> SourceFile sf now) sourceFilesHashed
-
-    putStrLn "Your watched files:"
-    mapM_ (putStrLn . show) sourceFiles
-
-    createDirectoryIfMissing True target
-
-    let state = AppState {stateSourceFiles = sourceFiles, stateSourceDir = source, stateTargetDir = target}
+    (_, site, _) <- runSnaplet Nothing distributerInit
 
     quickHttpServe site
 
@@ -85,13 +91,59 @@ computeFileContentHash filePath contents =
         let hash = showDigest $ sha256 $ pack $ filePath ++ contents
         in SourceFileHashed filePath hash
 
-site :: Snap ()
-site =
-    ifTop (writeBS "hello world") <|>
-    route [ ("foo", writeBS "bar")
-          , ("echo/:echoparam", echoHandler)
-          ] <|>
-    dir "static" (serveDirectory ".")
+
+distributerInit :: SnapletInit AppState AppState
+distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
+    h <- nestSnaplet "heist" heist $ heistInit "templates"
+
+    (source, target) <- liftIO $ readConfig
+    sourceFiles' <- liftIO $ getSourceFiles source
+    sourceFilesHashed <- liftIO $ mapM computeFileHash sourceFiles'
+    now <- liftIO $ getCurrentTime
+    let sourceFiles = map (\sf -> SourceFile sf now) sourceFilesHashed
+
+    liftIO $ putStrLn "Your watched files:"
+    liftIO $ mapM_ (putStrLn . show) sourceFiles
+
+    liftIO $ createDirectoryIfMissing True target
+
+    let s = AppState {
+        _heist = h,
+
+        _stateSourceFiles = sourceFiles,
+        _stateSourceDir = source,
+        _stateTargetDir = target
+    }
+
+    addRoutes [("", workList)]
+
+    return s
+
+
+workList :: Handler AppState AppState ()
+workList = do
+    sf <- use stateSourceFiles
+    renderWithSplices "list" $ allWorkItems sf
+
+allWorkItems :: [SourceFile] -> Splices (SnapletISplice AppState)
+allWorkItems sf = "items" ## (mapSplices $ runChildrenWith . listItem) sf
+
+listItem :: Monad m => SourceFile -> Splices (Splice m)
+listItem sourceFile = do
+    let sfh = hashFromSourceFile sourceFile
+    let sf = fileFromHash sfh
+    let sh = hashFromHash sfh
+    "listItem" ## textSplice (T.pack sf)
+    "listItemURL" ## textSplice $ T.pack $ "get/" ++ sh
+
+
+--site :: Snap ()
+--site =
+--    ifTop (writeBS "hello world") <|>
+--    route [ ("foo", writeBS "bar")
+--          , ("echo/:echoparam", echoHandler)
+--          ] -- <|>
+--    --dir "static" (serveDirectory ".")
 
 echoHandler :: Snap ()
 echoHandler = do
