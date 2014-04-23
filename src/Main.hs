@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
 
-import Data.List (sortBy)
+import Data.List (sortBy, (\\))
 import qualified Data.ConfigFile as ConfigFile
 import Data.ByteString.Lazy.Char8 (pack)
 import Data.Either.Utils (forceEither)
@@ -39,10 +39,17 @@ data SourceFile = SourceFile SourceFileHashed DateTime
    deriving (Show, Eq)
 hashFromSourceFile :: SourceFile -> SourceFileHashed
 hashFromSourceFile (SourceFile sfh _) = sfh
+sourceFileDateTime :: SourceFile -> DateTime
+sourceFileDateTime (SourceFile _ dt) = dt
 
 data AppState = AppState {
     _heist :: Snaplet (Heist AppState),
+
+    _tst :: String,
+
     _stateSourceFiles :: [SourceFile],
+    _stateFilesGiven :: [SourceFile],
+
     _stateSourceDir :: SourceDir,
     _stateTargetDir :: DestinationDir
 }
@@ -110,21 +117,61 @@ distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
     let s = AppState {
         _heist = h,
 
+        _tst = "",
+
         _stateSourceFiles = sourceFiles,
+        _stateFilesGiven = [],
+
         _stateSourceDir = source,
         _stateTargetDir = target
     }
 
-    addRoutes [("", workList)]
+    addRoutes [("", workList),
+            ("giveFile", giveFile)]
 
     return s
 
 
+-- ROUTES
 workList :: Handler AppState AppState ()
 workList = do
     sf <- use stateSourceFiles
     renderWithSplices "list" $ allWorkItems sf
 
+
+giveFile :: Handler AppState AppState ()
+giveFile = do
+    sfs <- use stateSourceFiles
+    gfs <- use stateFilesGiven
+
+    liftIO $ print $ show gfs
+    tst' <- use tst
+    liftIO $ print tst'
+
+    let rem = sfs \\ gfs
+    let remaining' =
+            if rem == []
+                then sfs
+                else rem
+
+    let sf = last $ sortBy (\a b -> compare (sourceFileDateTime a) (sourceFileDateTime b)) remaining'
+
+    stateFilesGiven .= [sf]
+
+    tst .= (show sf)
+
+    tst'' <- use tst
+
+    liftIO $ print tst''
+
+    --put tst
+
+    --set tst tst''
+
+    writeText $ T.pack (show sf)
+
+
+-- RENDERERS
 allWorkItems :: [SourceFile] -> Splices (SnapletISplice AppState)
 allWorkItems sf = "items" ## (mapSplices $ runChildrenWith . listItem) sf
 
@@ -157,7 +204,3 @@ serveFile [] = return Nothing
 serveFile sourceFiles = do
     let sf = last $ sortBy (\a b -> compare (sourceFileDateTime a) (sourceFileDateTime b)) sourceFiles
     return $ Just sf
-
-
-sourceFileDateTime :: SourceFile -> DateTime
-sourceFileDateTime (SourceFile _ dt) = dt
