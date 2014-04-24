@@ -1,6 +1,12 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
+
+import Control.Monad.Reader (ask)
 
 import Data.List (sortBy, (\\))
 import qualified Data.ConfigFile as ConfigFile
@@ -10,12 +16,15 @@ import Data.Digest.Pure.SHA (sha256, showDigest)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing, getDirectoryContents)
 import qualified Data.Text as T
 
+import Data.SafeCopy (base, deriveSafeCopy)
+import Data.Typeable (Typeable)
 import Data.DateTime (getCurrentTime, DateTime)
 
 import           Control.Applicative
 
 import           Snap
 import Snap.Snaplet.Heist
+import Snap.Snaplet.AcidState
 import Control.Lens
 import Heist
 import Heist.Interpreted
@@ -28,23 +37,16 @@ type AppConfig = (SourceDir, DestinationDir)
 
 type Hash = String
 
-data SourceFileHashed = SourceFileHashed FilePath Hash
-   deriving (Show, Eq)
-fileFromHash :: SourceFileHashed -> FilePath
-fileFromHash (SourceFileHashed fp _) = fp
-hashFromHash :: SourceFileHashed -> Hash
-hashFromHash (SourceFileHashed _ h) = h
+data SourceFile = SourceFile {
+    _sourceFilePath :: FilePath,
+    _sourceFileHash :: Hash,
+    _sourceFileTimestamp :: DateTime
+} deriving (Show, Eq, Ord, Typeable)
+makeLenses ''SourceFile
 
-data SourceFile = SourceFile SourceFileHashed DateTime
-   deriving (Show, Eq)
-hashFromSourceFile :: SourceFile -> SourceFileHashed
-hashFromSourceFile (SourceFile sfh _) = sfh
-sourceFileDateTime :: SourceFile -> DateTime
-sourceFileDateTime (SourceFile _ dt) = dt
+deriveSafeCopy 0 'base ''SourceFile
 
 data AppState = AppState {
-    _heist :: Snaplet (Heist AppState),
-
     _tst :: String,
 
     _stateSourceFiles :: [SourceFile],
@@ -52,10 +54,31 @@ data AppState = AppState {
 
     _stateSourceDir :: SourceDir,
     _stateTargetDir :: DestinationDir
-}
+} deriving (Show, Ord, Eq, Typeable)
 makeLenses ''AppState
 
-instance HasHeist AppState where
+deriveSafeCopy 0 'base ''AppState
+
+readState :: Query AppState AppState
+readState = do
+        state <- ask
+        return state
+
+writeState :: AppState -> Update AppState ()
+writeState newState = put newState
+
+makeAcidic ''AppState ['writeState, 'readState]
+
+data App = App {
+    _heist :: Snaplet (Heist App),
+    _acid :: Snaplet (Acid AppState)
+}
+makeLenses ''App
+
+instance HasAcid App AppState where
+    getAcidStore = view (acid.snapletValue)
+
+instance HasHeist App where
     heistLens = subSnaplet heist
 
 main :: IO ()
@@ -87,36 +110,36 @@ getSourceFiles source = do
 
     return sourceFilesWithDir
 
-computeFileHash :: FilePath -> IO SourceFileHashed
+computeFileHash :: FilePath -> IO SourceFile
 computeFileHash filePath = do
+    now <- liftIO $ getCurrentTime
     contents <- readFile filePath
 
-    return $ computeFileContentHash filePath contents
+    return $ SourceFile {
+        _sourceFilePath = filePath,
+        _sourceFileHash = computeFileContentHash filePath contents,
+        _sourceFileTimestamp = now
+    }
 
-computeFileContentHash :: FilePath -> String -> SourceFileHashed
-computeFileContentHash filePath contents = 
-        let hash = showDigest $ sha256 $ pack $ filePath ++ contents
-        in SourceFileHashed filePath hash
+computeFileContentHash :: FilePath -> String -> Hash
+computeFileContentHash filePath contents =
+                        showDigest $ sha256 $ pack $ filePath ++ contents
 
 
-distributerInit :: SnapletInit AppState AppState
+distributerInit :: SnapletInit App App
 distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
     h <- nestSnaplet "heist" heist $ heistInit "templates"
 
     (source, target) <- liftIO $ readConfig
     sourceFiles' <- liftIO $ getSourceFiles source
-    sourceFilesHashed <- liftIO $ mapM computeFileHash sourceFiles'
-    now <- liftIO $ getCurrentTime
-    let sourceFiles = map (\sf -> SourceFile sf now) sourceFilesHashed
+    sourceFiles <- liftIO $ mapM computeFileHash sourceFiles'
 
     liftIO $ putStrLn "Your watched files:"
     liftIO $ mapM_ (putStrLn . show) sourceFiles
 
     liftIO $ createDirectoryIfMissing True target
 
-    let s = AppState {
-        _heist = h,
-
+    let s = AppState{
         _tst = "",
 
         _stateSourceFiles = sourceFiles,
@@ -126,27 +149,35 @@ distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
         _stateTargetDir = target
     }
 
+    a <- nestSnaplet "acid" acid $ acidInit s
+
+    let app = App {
+        _heist = h,
+        _acid = a
+    }
+
     addRoutes [("", workList),
             ("giveFile", giveFile)]
 
-    return s
+    return app
 
 
 -- ROUTES
-workList :: Handler AppState AppState ()
+workList :: Handler App App ()
 workList = do
-    sf <- use stateSourceFiles
+    s <- query ReadState
+    let sf = s ^. stateSourceFiles
+
     renderWithSplices "list" $ allWorkItems sf
 
 
-giveFile :: Handler AppState AppState ()
+giveFile :: Handler App App ()
 giveFile = do
-    sfs <- use stateSourceFiles
-    gfs <- use stateFilesGiven
+    s <- query ReadState
+    let sfs = s  ^. stateSourceFiles
+    let gfs = s ^. stateFilesGiven
 
     liftIO $ print $ show gfs
-    tst' <- use tst
-    liftIO $ print tst'
 
     let rem = sfs \\ gfs
     let remaining' =
@@ -154,15 +185,17 @@ giveFile = do
                 then sfs
                 else rem
 
-    let sf = last $ sortBy (\a b -> compare (sourceFileDateTime a) (sourceFileDateTime b)) remaining'
+    let sf = last $ sortBy (\a b -> compare (a ^. sourceFileTimestamp) (b ^. sourceFileTimestamp)) remaining'
 
-    stateFilesGiven .= [sf]
+    let s' = stateFilesGiven .~ [sf] $ s
 
-    tst .= (show sf)
+    update $ WriteState s'
 
-    tst'' <- use tst
+    --tst .= (show sf)
 
-    liftIO $ print tst''
+    --tst'' <- use tst
+
+    --liftIO $ print tst''
 
     --put tst
 
@@ -172,16 +205,15 @@ giveFile = do
 
 
 -- RENDERERS
-allWorkItems :: [SourceFile] -> Splices (SnapletISplice AppState)
-allWorkItems sf = "items" ## (mapSplices $ runChildrenWith . listItem) sf
+allWorkItems :: [SourceFile] -> Splices (SnapletISplice App)
+allWorkItems sfs = "items" ## (mapSplices $ runChildrenWith . listItem) sfs
 
 listItem :: Monad m => SourceFile -> Splices (Splice m)
 listItem sourceFile = do
-    let sfh = hashFromSourceFile sourceFile
-    let sf = fileFromHash sfh
-    let sh = hashFromHash sfh
+    let sfh = sourceFile ^. sourceFileHash
+    let sf =  sourceFile ^. sourceFilePath
     "listItem" ## textSplice (T.pack sf)
-    "listItemURL" ## textSplice $ T.pack $ "get/" ++ sh
+    "listItemURL" ## textSplice $ T.pack $ "get/" ++ sfh
 
 
 --site :: Snap ()
@@ -202,5 +234,5 @@ echoHandler = do
 serveFile :: [SourceFile] -> Snap (Maybe SourceFile)
 serveFile [] = return Nothing
 serveFile sourceFiles = do
-    let sf = last $ sortBy (\a b -> compare (sourceFileDateTime a) (sourceFileDateTime b)) sourceFiles
+    let sf = last $ sortBy (\a b -> compare (a ^. sourceFileTimestamp) (b ^. sourceFileTimestamp)) sourceFiles
     return $ Just sf
