@@ -173,33 +173,34 @@ workList = do
 
 giveFile :: Handler App App ()
 giveFile = do
+    now <- liftIO $ getCurrentTime
+
     s <- query ReadState
     let sfs = s  ^. stateSourceFiles
     let gfs = s ^. stateFilesGiven
 
     liftIO $ print $ show gfs
 
-    let rem = sfs \\ gfs
+    let sfsHashes = map (\l -> l ^. sourceFileHash) sfs
+    let gfsHashes = map (\l -> l ^. sourceFileHash) gfs
+
+    let rem' = sfsHashes \\ gfsHashes
+    let rem = filter (\l -> (l ^. sourceFileHash) `elem` rem') sfs
     let remaining' =
             if rem == []
                 then sfs
                 else rem
 
-    let sf = last $ sortBy (\a b -> compare (a ^. sourceFileTimestamp) (b ^. sourceFileTimestamp)) remaining'
+    let sf = head $ sortBy (\a b -> compare (a ^. sourceFileTimestamp) (b ^. sourceFileTimestamp)) remaining'
 
-    let s' = stateFilesGiven .~ [sf] $ s
+    let sf' = sourceFileTimestamp .~ now $ sf
+
+    let s' =
+            if rem == []
+                then stateFilesGiven .~ [sf'] $ s
+                else stateFilesGiven <>~ [sf'] $ s
 
     update $ WriteState s'
-
-    --tst .= (show sf)
-
-    --tst'' <- use tst
-
-    --liftIO $ print tst''
-
-    --put tst
-
-    --set tst tst''
 
     writeText $ T.pack (show sf)
 
