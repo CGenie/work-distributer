@@ -122,6 +122,7 @@ distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
 
     addRoutes [("", workList),
                 ("giveFile", giveFile),
+                ("uploadFile/:hash", uploadFile),
                 ("static", serveDirectory source)
             ]
 
@@ -171,6 +172,7 @@ workList :: Handler App App ()
 workList = do
     s <- query ReadState
     let sf = s ^. stateSourceFiles
+    let source = s ^. stateSourceDir
 
     renderWithSplices "list" $ allWorkItems sf
 
@@ -208,7 +210,16 @@ giveFile = do
 
     update $ WriteState s'
 
-    renderWithSplices "giveFile" $ "file" ## runChildrenWith $ filePathItem sf source
+    renderWithSplices "giveFile" $ giveFileItem sf source
+
+
+uploadFile :: Handler App App ()
+uploadFile = do
+    mhash <- getParam "hash"
+    case mhash of
+        Nothing -> writeBS "No hash specified"
+        Just hash -> do
+            writeBS hash
 
 
 -- RENDERERS
@@ -216,14 +227,26 @@ allWorkItems :: [SourceFile] -> Splices (SnapletISplice App)
 allWorkItems sfs = "items" ## (mapSplices $ runChildrenWith . listItem) sfs
 
 listItem :: Monad m => SourceFile -> Splices (Splice m)
-listItem sourceFile = do
-    let sfh = sourceFile ^. sourceFileHash
-    let sf =  sourceFile ^. sourceFilePath
-    "listItem" ## textSplice (T.pack sf)
-    "listItemURL" ## textSplice $ T.pack $ "get/" ++ sfh
+listItem sf = do
+    let hi = hashItem sf
 
-filePathItem :: Monad m => SourceFile -> SourceDir -> Splices (Splice m)
-filePathItem sf source = do
+    "listItem" ## hi
+    "listItemURL" ## hi
+
+giveFileItem :: SourceFile -> SourceDir -> Splices (SnapletISplice App)
+giveFileItem sf source = "file" ## runChildrenWith $ do
+    let pi = pathItem sf source
+    let hi = hashItem sf
+
+    "path" ## pi
+    "hash" ## hi
+
+pathItem :: Monad m => SourceFile -> SourceDir -> Splice m
+pathItem sf source = do
     let fp = replace source "/static" $ sf ^. sourceFilePath
 
-    "path" ## textSplice (T.pack fp)
+    textSplice (T.pack fp)
+
+hashItem :: Monad m => SourceFile -> Splice m
+hashItem sf = textSplice $ T.pack $ sf ^. sourceFileHash
+
