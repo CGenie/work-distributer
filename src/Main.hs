@@ -9,6 +9,7 @@ module Main where
 import Control.Monad.Reader (ask)
 
 import Data.List (sortBy, (\\))
+import Data.String.Utils (replace)
 import qualified Data.ConfigFile as ConfigFile
 import Data.ByteString.Lazy.Char8 (pack)
 import Data.Either.Utils (forceEither)
@@ -25,6 +26,7 @@ import           Control.Applicative
 import           Snap
 import Snap.Snaplet.Heist
 import Snap.Snaplet.AcidState
+import Snap.Util.FileServe (serveDirectory)
 import Control.Lens
 import Heist
 import Heist.Interpreted
@@ -87,6 +89,44 @@ main = do
 
     quickHttpServe site
 
+
+distributerInit :: SnapletInit App App
+distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
+    h <- nestSnaplet "heist" heist $ heistInit "templates"
+
+    (source, target) <- liftIO $ readConfig
+    sourceFiles' <- liftIO $ getSourceFiles source
+    sourceFiles <- liftIO $ mapM computeFileHash sourceFiles'
+
+    liftIO $ putStrLn "Your watched files:"
+    liftIO $ mapM_ (putStrLn . show) sourceFiles
+
+    liftIO $ createDirectoryIfMissing True target
+
+    let s = AppState{
+        _tst = "",
+
+        _stateSourceFiles = sourceFiles,
+        _stateFilesGiven = [],
+
+        _stateSourceDir = source,
+        _stateTargetDir = target
+    }
+
+    a <- nestSnaplet "acid" acid $ acidInit s
+
+    let app = App {
+        _heist = h,
+        _acid = a
+    }
+
+    addRoutes [("", workList),
+                ("giveFile", giveFile),
+                ("static", serveDirectory source)
+            ]
+
+    return app
+
 readConfig :: IO AppConfig
 readConfig = do
     home <- getHomeDirectory
@@ -126,42 +166,6 @@ computeFileContentHash filePath contents =
                         showDigest $ sha256 $ pack $ filePath ++ contents
 
 
-distributerInit :: SnapletInit App App
-distributerInit = makeSnaplet "distributer" "Work distributer" Nothing $ do
-    h <- nestSnaplet "heist" heist $ heistInit "templates"
-
-    (source, target) <- liftIO $ readConfig
-    sourceFiles' <- liftIO $ getSourceFiles source
-    sourceFiles <- liftIO $ mapM computeFileHash sourceFiles'
-
-    liftIO $ putStrLn "Your watched files:"
-    liftIO $ mapM_ (putStrLn . show) sourceFiles
-
-    liftIO $ createDirectoryIfMissing True target
-
-    let s = AppState{
-        _tst = "",
-
-        _stateSourceFiles = sourceFiles,
-        _stateFilesGiven = [],
-
-        _stateSourceDir = source,
-        _stateTargetDir = target
-    }
-
-    a <- nestSnaplet "acid" acid $ acidInit s
-
-    let app = App {
-        _heist = h,
-        _acid = a
-    }
-
-    addRoutes [("", workList),
-            ("giveFile", giveFile)]
-
-    return app
-
-
 -- ROUTES
 workList :: Handler App App ()
 workList = do
@@ -178,6 +182,8 @@ giveFile = do
     s <- query ReadState
     let sfs = s  ^. stateSourceFiles
     let gfs = s ^. stateFilesGiven
+
+    let source = s ^. stateSourceDir
 
     liftIO $ print $ show gfs
 
@@ -202,7 +208,7 @@ giveFile = do
 
     update $ WriteState s'
 
-    writeText $ T.pack (show sf)
+    renderWithSplices "giveFile" $ "file" ## runChildrenWith $ filePathItem sf source
 
 
 -- RENDERERS
@@ -216,24 +222,8 @@ listItem sourceFile = do
     "listItem" ## textSplice (T.pack sf)
     "listItemURL" ## textSplice $ T.pack $ "get/" ++ sfh
 
+filePathItem :: Monad m => SourceFile -> SourceDir -> Splices (Splice m)
+filePathItem sf source = do
+    let fp = replace source "/static" $ sf ^. sourceFilePath
 
---site :: Snap ()
---site =
---    ifTop (writeBS "hello world") <|>
---    route [ ("foo", writeBS "bar")
---          , ("echo/:echoparam", echoHandler)
---          ] -- <|>
---    --dir "static" (serveDirectory ".")
-
-echoHandler :: Snap ()
-echoHandler = do
-    param <- getParam "echoparam"
-    maybe (writeBS "must specify echo/param in URL")
-          writeBS param
-
-
-serveFile :: [SourceFile] -> Snap (Maybe SourceFile)
-serveFile [] = return Nothing
-serveFile sourceFiles = do
-    let sf = last $ sortBy (\a b -> compare (a ^. sourceFileTimestamp) (b ^. sourceFileTimestamp)) sourceFiles
-    return $ Just sf
+    "path" ## textSplice (T.pack fp)
