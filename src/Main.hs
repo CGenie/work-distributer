@@ -9,9 +9,11 @@ module Main where
 import Control.Monad.Reader (ask)
 
 import Data.List (sortBy, (\\))
+import Data.Maybe (listToMaybe)
 import Data.String.Utils (replace)
 import qualified Data.ConfigFile as ConfigFile
 import Data.ByteString.Lazy.Char8 (pack)
+import qualified Data.ByteString.Char8 as B
 import Data.Either.Utils (forceEither)
 import Data.Digest.Pure.SHA (sha256, showDigest)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing, getDirectoryContents)
@@ -189,11 +191,9 @@ giveFile = do
 
     liftIO $ print $ show gfs
 
-    let sfsHashes = map (\l -> l ^. sourceFileHash) sfs
     let gfsHashes = map (\l -> l ^. sourceFileHash) gfs
 
-    let rem' = sfsHashes \\ gfsHashes
-    let rem = filter (\l -> (l ^. sourceFileHash) `elem` rem') sfs
+    let rem = filter (\l -> (l ^. sourceFileHash) `notElem` gfsHashes) sfs
     let remaining' =
             if rem == []
                 then sfs
@@ -214,12 +214,33 @@ giveFile = do
 
 
 uploadFile :: Handler App App ()
-uploadFile = do
-    mhash <- getParam "hash"
-    case mhash of
-        Nothing -> writeBS "No hash specified"
-        Just hash -> do
-            writeBS hash
+uploadFile = method GET getter <|> method POST setter
+    where
+        getter = do
+            mhash <- getParam "hash"
+            case mhash of
+                Nothing -> writeBS "No hash specified"
+                Just hash -> do
+                    writeBS hash
+        setter = do
+            mhash <- getParam "hash"
+            case mhash of
+                Nothing -> writeBS "No hash specified"
+                Just hash' -> do
+                    let hash = B.unpack hash'
+                    s <- query ReadState
+                    let msf = sourceFileFromAppStateByHash s hash
+                    liftIO $ print $ show $ msf
+                    case msf of
+                        Nothing -> writeBS "No file found with this hash"
+                        Just sf -> writeBS $ B.pack $ show sf
+
+
+sourceFileFromAppStateByHash :: AppState -> Hash -> Maybe SourceFile
+sourceFileFromAppStateByHash s hash = listToMaybe filtered
+                where
+                    sfs = s  ^. stateSourceFiles
+                    filtered = filter (\l -> (l ^. sourceFileHash) == hash) sfs
 
 
 -- RENDERERS
