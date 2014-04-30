@@ -13,6 +13,7 @@ import Data.Maybe (listToMaybe)
 import Data.String.Utils (replace)
 import qualified Data.ConfigFile as ConfigFile
 import Data.ByteString.Lazy.Char8 (pack)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B
 import Data.Either.Utils (forceEither)
 import Data.Digest.Pure.SHA (sha256, showDigest)
@@ -25,10 +26,12 @@ import Data.DateTime (getCurrentTime, DateTime)
 
 import           Control.Applicative
 
-import           Snap
+import Snap
 import Snap.Snaplet.Heist
 import Snap.Snaplet.AcidState
 import Snap.Util.FileServe (serveDirectory)
+import Snap.Util.FileUploads (handleMultipart, defaultUploadPolicy)
+import Snap.Iteratee (consume)
 import Control.Lens
 import Heist
 import Heist.Interpreted
@@ -217,30 +220,60 @@ uploadFile :: Handler App App ()
 uploadFile = method GET getter <|> method POST setter
     where
         getter = do
-            mhash <- getParam "hash"
-            case mhash of
-                Nothing -> writeBS "No hash specified"
-                Just hash -> do
-                    writeBS hash
+            esf <- hashReader
+            case esf of
+                Left err -> writeBS err
+                Right sf -> do
+                    --writeBS $ B.pack $ show sf
+
+                    s <- query ReadState
+                    let source = s ^. stateSourceDir
+                    renderWithSplices "uploadFile" $ giveFileItem sf source
+
         setter = do
+            esf <- hashReader
+            liftIO $ print $ show $ esf
+            case esf of
+                Left err -> writeBS err
+                Right sf -> do
+                    [file] <- handleMultipart defaultUploadPolicy $ \part -> do
+                        content <- liftM B.concat consume
+                        return content
+
+                    s <- query ReadState
+                    let source = s ^. stateSourceDir
+                    let target = s ^. stateTargetDir
+                    let path = replace source target $ sf ^. sourceFilePath
+
+                    liftIO $ BS.writeFile path file
+
+                    let sfs = filter
+                                (\sf' -> (sf' ^. sourceFileHash) /= (sf ^. sourceFileHash)) $
+                                s ^. stateSourceFiles
+                    let s' = stateSourceFiles .~ sfs $ s
+                    update $ WriteState s'
+
+                    writeBS $ B.pack $ show sf
+
+
+        hashReader = do
             mhash <- getParam "hash"
             case mhash of
-                Nothing -> writeBS "No hash specified"
+                Nothing -> return $ Left "No hash provided"
                 Just hash' -> do
                     let hash = B.unpack hash'
                     s <- query ReadState
                     let msf = sourceFileFromAppStateByHash s hash
-                    liftIO $ print $ show $ msf
                     case msf of
-                        Nothing -> writeBS "No file found with this hash"
-                        Just sf -> writeBS $ B.pack $ show sf
+                        Nothing -> return $ Left "File not found"
+                        Just sf -> return $ Right sf
 
 
 sourceFileFromAppStateByHash :: AppState -> Hash -> Maybe SourceFile
 sourceFileFromAppStateByHash s hash = listToMaybe filtered
-                where
-                    sfs = s  ^. stateSourceFiles
-                    filtered = filter (\l -> (l ^. sourceFileHash) == hash) sfs
+    where
+        sfs = s  ^. stateSourceFiles
+        filtered = filter (\l -> (l ^. sourceFileHash) == hash) sfs
 
 
 -- RENDERERS
